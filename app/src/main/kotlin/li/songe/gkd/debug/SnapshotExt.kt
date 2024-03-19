@@ -19,6 +19,7 @@ import li.songe.gkd.data.createComplexSnapshot
 import li.songe.gkd.data.toSnapshot
 import li.songe.gkd.db.DbSet
 import li.songe.gkd.service.GkdAbService
+import li.songe.gkd.util.appInfoCacheFlow
 import li.songe.gkd.util.keepNullJson
 import li.songe.gkd.util.snapshotFolder
 import li.songe.gkd.util.snapshotZipDir
@@ -38,8 +39,25 @@ object SnapshotExt {
     fun getScreenshotPath(snapshotId: Long) =
         "${getSnapshotParentPath(snapshotId)}/${snapshotId}.png"
 
-    suspend fun getSnapshotZipFile(snapshotId: Long): File {
-        val file = File(snapshotZipDir, "${snapshotId}.zip")
+    suspend fun getSnapshotZipFile(
+        snapshotId: Long,
+        appId: String? = null,
+        activityId: String? = null
+    ): File {
+        val filename = if (appId != null) {
+            val name =
+                appInfoCacheFlow.value[appId]?.name?.filterNot { c -> c in "\\/:*?\"<>|" || c <= ' ' }
+            if (activityId != null) {
+                "${(name ?: appId).take(20)}_${
+                    activityId.split('.').last().take(40)
+                }-${snapshotId}.zip"
+            } else {
+                "${(name ?: appId).take(20)}-${snapshotId}.zip"
+            }
+        } else {
+            "${snapshotId}.zip"
+        }
+        val file = snapshotZipDir.resolve(filename)
         if (file.exists()) {
             return file
         }

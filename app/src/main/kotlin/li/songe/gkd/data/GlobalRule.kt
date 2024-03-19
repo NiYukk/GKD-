@@ -1,6 +1,8 @@
 package li.songe.gkd.data
 
+import kotlinx.collections.immutable.ImmutableMap
 import li.songe.gkd.service.launcherAppId
+import li.songe.gkd.util.ResolvedGlobalGroup
 import li.songe.gkd.util.systemAppsFlow
 
 data class GlobalApp(
@@ -11,29 +13,41 @@ data class GlobalApp(
 )
 
 class GlobalRule(
-    subsItem: SubsItem,
     rule: RawSubscription.RawGlobalRule,
-    group: RawSubscription.RawGlobalGroup,
-    rawSubs: RawSubscription,
-    exclude: String?,
+    g: ResolvedGlobalGroup,
+    appInfoCache: ImmutableMap<String, AppInfo>,
 ) : ResolvedRule(
     rule = rule,
-    group = group,
-    subsItem = subsItem,
-    rawSubs = rawSubs,
-    exclude = exclude,
+    g = g,
 ) {
-
-    val matchAnyApp = rule.matchAnyApp ?: group.matchAnyApp ?: true
-    val matchLauncher = rule.matchLauncher ?: group.matchLauncher ?: false
-    val matchSystemApp = rule.matchSystemApp ?: group.matchSystemApp ?: false
+    val group = g.group
+    private val matchAnyApp = rule.matchAnyApp ?: group.matchAnyApp ?: true
+    private val matchLauncher = rule.matchLauncher ?: group.matchLauncher ?: false
+    private val matchSystemApp = rule.matchSystemApp ?: group.matchSystemApp ?: false
     val apps = mutableMapOf<String, GlobalApp>().apply {
-        (rule.apps ?: group.apps ?: emptyList()).forEach { a ->
+        (rule.apps ?: group.apps ?: emptyList()).filter { a ->
+            appInfoCache.containsKey(a.id) // 过滤掉未安装应用
+        }.forEach { a ->
+            val enable = a.enable ?: appInfoCache[a.id]?.let { appInfo ->
+                if (a.excludeVersionCodes?.contains(appInfo.versionCode) == true) {
+                    return@let false
+                }
+                if (a.excludeVersionNames?.contains(appInfo.versionName) == true) {
+                    return@let false
+                }
+                a.versionCodes?.apply {
+                    return@let contains(appInfo.versionCode)
+                }
+                a.versionNames?.apply {
+                    return@let contains(appInfo.versionName)
+                }
+                null
+            } ?: true
             this[a.id] = GlobalApp(
                 id = a.id,
-                enable = a.enable ?: true,
+                enable = enable,
                 activityIds = getFixActivityIds(a.id, a.activityIds),
-                excludeActivityIds = getFixActivityIds(a.id, a.excludeActivityIds)
+                excludeActivityIds = getFixActivityIds(a.id, a.excludeActivityIds),
             )
         }
     }
@@ -50,12 +64,14 @@ class GlobalRule(
         if (excludeData.excludeAppIds.contains(appId)) {
             return false
         }
+        if (activityId != null && excludeData.activityIds.contains(appId to activityId)) {
+            return false
+        }
         if (excludeData.includeAppIds.contains(appId)) {
             activityId ?: return true
             val app = apps[appId] ?: return true
+            // 规则自带页面的禁用
             return !app.excludeActivityIds.any { e -> e.startsWith(activityId) }
-        } else if (activityId != null && excludeData.activityIds.contains(appId to activityId)) {
-            return false
         }
         if (!matchLauncher && appId == launcherAppId) {
             return false

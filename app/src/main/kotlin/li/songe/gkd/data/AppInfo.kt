@@ -4,16 +4,21 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.graphics.drawable.Drawable
 import android.os.Build
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import li.songe.gkd.app
 
+@Serializable
 data class AppInfo(
     val id: String,
     val name: String,
-    val icon: Drawable?,
+    @Transient
+    val icon: Drawable? = null,
     val versionCode: Long,
     val versionName: String?,
     val isSystem: Boolean,
     val mtime: Long,
+    val hidden: Boolean,
 )
 
 fun PackageInfo.toAppInfo(): AppInfo? {
@@ -30,6 +35,7 @@ fun PackageInfo.toAppInfo(): AppInfo? {
         },
         versionName = versionName,
         isSystem = (ApplicationInfo.FLAG_SYSTEM and applicationInfo.flags) != 0,
-        mtime = lastUpdateTime
+        mtime = lastUpdateTime,
+        hidden = app.packageManager.getLaunchIntentForPackage(packageName) == null
     )
 }

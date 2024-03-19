@@ -54,8 +54,8 @@ android {
         targetSdk = libs.versions.android.targetSdk.get().toInt()
 
         applicationId = "li.songe.gkd"
-        versionCode = 19
-        versionName = "1.6.4"
+        versionCode = 24
+        versionName = "1.7.0-beta.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -68,9 +68,6 @@ android {
             "String",
             "GIT_COMMIT_ID",
             jsonStringOf(gitInfo?.commitId)
-        )
-        buildConfigField(
-            "String", "GKD_BUGLY_APP_ID", jsonStringOf(project.properties["GKD_BUGLY_APP_ID"])
         )
         resourceConfigurations.addAll(listOf("zh", "en"))
         ndk {
@@ -115,6 +112,7 @@ android {
             versionNameSuffix = vnSuffix
             applicationIdSuffix = ".debug"
             resValue("string", "app_name", "GKD-debug")
+            resValue("string", "capture_label", "捕获快照-debug")
         }
     }
     compileOptions {
@@ -132,6 +130,7 @@ android {
     buildFeatures {
         buildConfig = true
         compose = true
+        aidl = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = libs.versions.compose.compilerVersion.get()
@@ -181,12 +180,15 @@ dependencies {
     implementation(libs.rikka.shizuku.provider)
     implementation(libs.lsposed.hiddenapibypass)
 
-    implementation(libs.tencent.bugly)
     implementation(libs.tencent.mmkv)
 
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
+    implementation(libs.androidx.room.paging)
     ksp(libs.androidx.room.compiler)
+
+    implementation(libs.androidx.paging.runtime)
+    implementation(libs.androidx.paging.compose)
 
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.cio)
@@ -220,4 +222,8 @@ dependencies {
 
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
+
+    implementation(libs.exp4j)
+
+    implementation(libs.toaster)
 }

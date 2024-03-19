@@ -4,19 +4,19 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Sort
@@ -31,6 +31,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -49,10 +50,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -87,6 +88,7 @@ fun GlobalRuleExcludePage(subsItemId: Long, groupKey: Int) {
     val showAppInfos = vm.showAppInfosFlow.collectAsState().value
     val searchStr by vm.searchStrFlow.collectAsState()
     val showSystemApp by vm.showSystemAppFlow.collectAsState()
+    val showHiddenApp by vm.showHiddenAppFlow.collectAsState()
     val sortType by vm.sortTypeFlow.collectAsState()
 
     var showEditDlg by remember {
@@ -122,7 +124,7 @@ fun GlobalRuleExcludePage(subsItemId: Long, groupKey: Int) {
                 AppBarTextField(
                     value = searchStr,
                     onValueChange = { newValue -> vm.searchStrFlow.value = newValue.trim() },
-                    hint = "请输入应用名称",
+                    hint = "请输入应用名称/ID",
                     modifier = Modifier.focusRequester(focusRequester)
                 )
             } else {
@@ -209,6 +211,24 @@ fun GlobalRuleExcludePage(subsItemId: Long, groupKey: Int) {
                                 vm.showSystemAppFlow.value = !vm.showSystemAppFlow.value
                             },
                         )
+                        DropdownMenuItem(
+                            text = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(
+                                        checked = showHiddenApp,
+                                        onCheckedChange = {
+                                            vm.showHiddenAppFlow.value =
+                                                !vm.showHiddenAppFlow.value
+                                        })
+                                    Text("显示隐藏应用")
+                                }
+                            },
+                            onClick = {
+                                vm.showHiddenAppFlow.value = !vm.showHiddenAppFlow.value
+                            },
+                        )
                     }
                 }
             }
@@ -218,27 +238,33 @@ fun GlobalRuleExcludePage(subsItemId: Long, groupKey: Int) {
             items(showAppInfos, { it.id }) { appInfo ->
                 Row(
                     modifier = Modifier
-                        .height(60.dp)
-                        .padding(4.dp),
+                        .height(IntrinsicSize.Min)
+                        .padding(10.dp, 6.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (appInfo.icon != null) {
-                        Image(
-                            painter = rememberDrawablePainter(appInfo.icon),
-                            contentDescription = null,
+                        Box(
                             modifier = Modifier
-                                .size(52.dp)
-                                .clip(CircleShape)
-                        )
+                                .fillMaxHeight()
+                                .aspectRatio(1f)
+                        ) {
+                            Image(
+                                painter = rememberDrawablePainter(appInfo.icon),
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .padding(4.dp)
+                            )
+                        }
                     } else {
                         Icon(
                             imageVector = Icons.Default.Android,
                             contentDescription = null,
                             modifier = Modifier
-                                .size(52.dp)
+                                .aspectRatio(1f)
+                                .fillMaxHeight()
                                 .padding(4.dp)
-                                .clip(CircleShape)
                         )
                     }
 
@@ -256,9 +282,15 @@ fun GlobalRuleExcludePage(subsItemId: Long, groupKey: Int) {
                             maxLines = 1,
                             softWrap = false,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth(),
+                            style = LocalTextStyle.current.let {
+                                if (appInfo.isSystem) {
+                                    it.copy(textDecoration = TextDecoration.Underline)
+                                } else {
+                                    it
+                                }
+                            }
                         )
-
                         Text(
                             text = appInfo.id,
                             maxLines = 1,
@@ -321,12 +353,14 @@ fun GlobalRuleExcludePage(subsItemId: Long, groupKey: Int) {
         }
         val oldSource = remember { source }
         AlertDialog(
-            title = { Text(text = "编辑禁用项") },
+            title = { Text(text = "编辑禁用") },
             text = {
                 OutlinedTextField(
                     value = source,
                     onValueChange = { source = it },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester),
                     placeholder = {
                         Text(
                             fontSize = 12.sp,
@@ -335,6 +369,9 @@ fun GlobalRuleExcludePage(subsItemId: Long, groupKey: Int) {
                     },
                     maxLines = 10,
                 )
+                LaunchedEffect(null) {
+                    focusRequester.requestFocus()
+                }
             },
             onDismissRequest = { showEditDlg = false },
             dismissButton = {
@@ -346,6 +383,7 @@ fun GlobalRuleExcludePage(subsItemId: Long, groupKey: Int) {
                 TextButton(onClick = {
                     if (oldSource == source) {
                         toast("禁用项无变动")
+                        showEditDlg = false
                         return@TextButton
                     }
                     showEditDlg = false
@@ -382,6 +420,7 @@ fun getChecked(
         return null
     }
     excludeData.appIds[appId]?.let { return !it }
+    if (enable == true) return true
     if (appInfo?.id == launcherAppId) {
         return group.matchLauncher ?: false
     }

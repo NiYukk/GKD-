@@ -51,37 +51,39 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
-import com.blankj.utilcode.util.ClipboardUtils
 import com.blankj.utilcode.util.LogUtils
 import com.dylanc.activityresult.launcher.launchForResult
 import com.ramcosta.composedestinations.annotation.Destination
 import com.ramcosta.composedestinations.annotation.RootNavGraph
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.update
 import li.songe.gkd.MainActivity
 import li.songe.gkd.appScope
 import li.songe.gkd.debug.FloatingService
 import li.songe.gkd.debug.HttpService
 import li.songe.gkd.debug.ScreenshotService
+import li.songe.gkd.shizuku.CommandResult
 import li.songe.gkd.shizuku.newActivityTaskManager
+import li.songe.gkd.shizuku.newUserService
 import li.songe.gkd.shizuku.safeGetTasks
 import li.songe.gkd.shizuku.shizukuIsSafeOK
 import li.songe.gkd.ui.component.AuthCard
 import li.songe.gkd.ui.component.SettingItem
 import li.songe.gkd.ui.component.TextSwitch
 import li.songe.gkd.ui.destinations.SnapshotPageDestination
-import li.songe.gkd.util.Ext
 import li.songe.gkd.util.LocalLauncher
 import li.songe.gkd.util.LocalNavController
 import li.songe.gkd.util.ProfileTransitions
 import li.songe.gkd.util.authActionFlow
 import li.songe.gkd.util.canDrawOverlaysAuthAction
 import li.songe.gkd.util.checkOrRequestNotifPermission
+import li.songe.gkd.util.json
 import li.songe.gkd.util.launchAsFn
 import li.songe.gkd.util.launchTry
 import li.songe.gkd.util.navigate
+import li.songe.gkd.util.openUri
 import li.songe.gkd.util.storeFlow
 import li.songe.gkd.util.toast
-import li.songe.gkd.util.updateStorage
 import li.songe.gkd.util.usePollState
 import rikka.shizuku.Shizuku
 
@@ -124,7 +126,7 @@ fun DebugPage() {
             val shizukuIsOk by usePollState { shizukuIsSafeOK() }
             if (!shizukuIsOk) {
                 AuthCard(title = "Shizuku授权",
-                    desc = "高级运行模式,能更准确识别界面活动ID",
+                    desc = "高级模式:准确识别界面ID,强制模拟点击",
                     onAuthClick = {
                         try {
                             Shizuku.requestPermission(Activity.RESULT_OK)
@@ -135,9 +137,9 @@ fun DebugPage() {
                     })
                 HorizontalDivider()
             } else {
-                TextSwitch(name = "Shizuku模式",
-                    desc = "高级运行模式,能更准确识别界面活动ID",
-                    checked = store.enableShizuku,
+                TextSwitch(name = "Shizuku-界面识别",
+                    desc = "更准确识别界面ID",
+                    checked = store.enableShizukuActivity,
                     onCheckedChange = { enableShizuku ->
                         if (enableShizuku) {
                             appScope.launchTry(Dispatchers.IO) {
@@ -145,20 +147,39 @@ fun DebugPage() {
                                 val tasks =
                                     newActivityTaskManager()?.safeGetTasks()?.firstOrNull()
                                 if (tasks != null) {
-                                    updateStorage(
-                                        storeFlow, store.copy(
-                                            enableShizuku = true
-                                        )
+                                    storeFlow.value = store.copy(
+                                        enableShizukuActivity = true
                                     )
                                 } else {
-                                    toast("Shizuku方法校验失败,无法使用")
+                                    toast("Shizuku-界面识别校验失败,无法使用")
                                 }
                             }
                         } else {
-                            updateStorage(
-                                storeFlow, store.copy(
-                                    enableShizuku = false
-                                )
+                            storeFlow.value = store.copy(
+                                enableShizukuActivity = false
+                            )
+                        }
+                    })
+                HorizontalDivider()
+                TextSwitch(
+                    name = "Shizuku-模拟点击",
+                    desc = "变更 clickCenter 为强制模拟点击",
+                    checked = store.enableShizukuClick,
+                    onCheckedChange = { enableShizuku ->
+                        if (enableShizuku) {
+                            appScope.launchTry(Dispatchers.IO) {
+                                val service = newUserService()
+                                val result = service.userService.execCommand("input tap 0 0")
+                                service.destroy()
+                                if (json.decodeFromString<CommandResult>(result).code == 0) {
+                                    storeFlow.update { it.copy(enableShizukuClick = true) }
+                                } else {
+                                    toast("Shizuku-模拟点击校验失败,无法使用")
+                                }
+                            }
+                        } else {
+                            storeFlow.value = store.copy(
+                                enableShizukuClick = false
                             )
                         }
 
@@ -167,6 +188,7 @@ fun DebugPage() {
             }
 
             val httpServerRunning by HttpService.isRunning.collectAsState()
+            val localNetworkIps by HttpService.localNetworkIpsFlow.collectAsState()
 
             Row(
                 modifier = Modifier.padding(10.dp, 5.dp),
@@ -190,27 +212,25 @@ fun DebugPage() {
                             )
                         } else {
                             Text(
-                                text = "点击复制下面任意链接打开即可自动连接",
+                                text = "点击下面任意链接打开即可自动连接",
                             )
                             Row {
                                 Text(
                                     text = "http://127.0.0.1:${store.httpServerPort}",
                                     color = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.clickable {
-                                        ClipboardUtils.copyText("http://127.0.0.1:${store.httpServerPort}")
-                                        toast("复制成功")
+                                        context.openUri("http://127.0.0.1:${store.httpServerPort}")
                                     }
                                 )
                                 Spacer(modifier = Modifier.width(2.dp))
                                 Text(text = "仅本设备可访问")
                             }
-                            Ext.getIpAddressInLocalNetwork().forEach { host ->
+                            localNetworkIps.forEach { host ->
                                 Text(
                                     text = "http://${host}:${store.httpServerPort}",
                                     color = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.clickable {
-                                        ClipboardUtils.copyText("http://${host}:${store.httpServerPort}")
-                                        toast("复制成功")
+                                        context.openUri("http://${host}:${store.httpServerPort}")
                                     }
                                 )
                             }
@@ -242,14 +262,12 @@ fun DebugPage() {
             HorizontalDivider()
 
             TextSwitch(
-                name = "自动清除内存订阅",
-                desc = "当HTTP服务关闭时,清除内存订阅",
-                checked = store.autoClearMemorySubs
+                name = "保留内存订阅",
+                desc = "当HTTP服务关闭时,保留内存订阅",
+                checked = !store.autoClearMemorySubs
             ) {
-                updateStorage(
-                    storeFlow, store.copy(
-                        autoClearMemorySubs = it
-                    )
+                storeFlow.value = store.copy(
+                    autoClearMemorySubs = !it
                 )
             }
             HorizontalDivider()
@@ -308,10 +326,8 @@ fun DebugPage() {
                 desc = "当音量变化时,生成快照,如果悬浮窗按钮不工作,可以使用这个",
                 checked = store.captureVolumeChange
             ) {
-                updateStorage(
-                    storeFlow, store.copy(
-                        captureVolumeChange = it
-                    )
+                storeFlow.value = store.copy(
+                    captureVolumeChange = it
                 )
             }
 
@@ -321,10 +337,8 @@ fun DebugPage() {
                 desc = "当用户截屏时保存快照(需手动替换快照图片),仅支持部分小米设备",
                 checked = store.captureScreenshot
             ) {
-                updateStorage(
-                    storeFlow, store.copy(
-                        captureScreenshot = it
-                    )
+                storeFlow.value = store.copy(
+                    captureScreenshot = it
                 )
             }
 
@@ -334,10 +348,8 @@ fun DebugPage() {
                 desc = "当保存快照时,隐藏截图里的顶部状态栏高度区域",
                 checked = store.hideSnapshotStatusBar
             ) {
-                updateStorage(
-                    storeFlow, store.copy(
-                        hideSnapshotStatusBar = it
-                    )
+                storeFlow.value = store.copy(
+                    hideSnapshotStatusBar = it
                 )
             }
 
@@ -368,19 +380,20 @@ fun DebugPage() {
                     },
                 )
             }, onDismissRequest = { showPortDlg = false }, confirmButton = {
-                TextButton(onClick = {
-                    val newPort = value.toIntOrNull()
-                    if (newPort == null || !(5000 <= newPort && newPort <= 65535)) {
-                        toast("请输入在 5000~65535 的任意数字")
-                        return@TextButton
-                    }
-                    updateStorage(
-                        storeFlow, store.copy(
+                TextButton(
+                    enabled = value.isNotEmpty(),
+                    onClick = {
+                        val newPort = value.toIntOrNull()
+                        if (newPort == null || !(5000 <= newPort && newPort <= 65535)) {
+                            toast("请输入在 5000~65535 的任意数字")
+                            return@TextButton
+                        }
+                        storeFlow.value = store.copy(
                             httpServerPort = newPort
                         )
-                    )
-                    showPortDlg = false
-                }) {
+                        showPortDlg = false
+                    }
+                ) {
                     Text(
                         text = "确认", modifier = Modifier
                     )

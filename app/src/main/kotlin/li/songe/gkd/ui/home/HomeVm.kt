@@ -20,11 +20,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
-import li.songe.gkd.appScope
 import li.songe.gkd.data.GithubPoliciesAsset
 import li.songe.gkd.data.RawSubscription
 import li.songe.gkd.data.RpcError
@@ -35,17 +32,12 @@ import li.songe.gkd.util.FILE_UPLOAD_URL
 import li.songe.gkd.util.LoadStatus
 import li.songe.gkd.util.SortTypeOption
 import li.songe.gkd.util.appInfoCacheFlow
-import li.songe.gkd.util.authActionFlow
-import li.songe.gkd.util.checkUpdate
 import li.songe.gkd.util.clickCountFlow
 import li.songe.gkd.util.client
-import li.songe.gkd.util.initFolder
 import li.songe.gkd.util.launchTry
-import li.songe.gkd.util.logZipDir
-import li.songe.gkd.util.newVersionApkDir
+import li.songe.gkd.util.map
 import li.songe.gkd.util.orderedAppInfosFlow
 import li.songe.gkd.util.ruleSummaryFlow
-import li.songe.gkd.util.snapshotZipDir
 import li.songe.gkd.util.storeFlow
 import li.songe.gkd.util.subsIdToRawFlow
 import li.songe.gkd.util.subsItemsFlow
@@ -57,46 +49,6 @@ import javax.inject.Inject
 @HiltViewModel
 class HomeVm @Inject constructor() : ViewModel() {
     val tabFlow = MutableStateFlow(controlNav)
-
-    init {
-        appScope.launchTry(Dispatchers.IO) {
-            val localSubsItem = SubsItem(
-                id = -2, order = -2, mtime = System.currentTimeMillis()
-            )
-            if (!DbSet.subsItemDao.query().first().any { s -> s.id == localSubsItem.id }) {
-                DbSet.subsItemDao.insert(localSubsItem)
-            }
-        }
-
-        viewModelScope.launchTry(Dispatchers.IO) {
-            // 每次进入删除缓存
-            listOf(snapshotZipDir, newVersionApkDir, logZipDir).forEach { dir ->
-                if (dir.isDirectory && dir.exists()) {
-                    dir.listFiles()?.forEach { file ->
-                        if (file.isFile) {
-                            file.delete()
-                        }
-                    }
-                }
-            }
-        }
-
-        viewModelScope.launchTry(Dispatchers.IO) {
-            // 在某些机型由于未知原因创建失败
-            // 在此保证每次重新打开APP都能重新检测创建
-            initFolder()
-        }
-
-        if (storeFlow.value.autoCheckAppUpdate) {
-            appScope.launch {
-                try {
-                    checkUpdate()
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-        }
-    }
 
     val uploadStatusFlow = MutableStateFlow<LoadStatus<GithubPoliciesAsset>?>(null)
     var uploadJob: Job? = null
@@ -131,11 +83,6 @@ class HomeVm @Inject constructor() : ViewModel() {
                 uploadStatusFlow.value = LoadStatus.Failure(e)
             }
         }
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        authActionFlow.value = null
     }
 
     private val latestRecordFlow =
@@ -219,14 +166,26 @@ class HomeVm @Inject constructor() : ViewModel() {
     }
 
     val refreshingFlow = MutableStateFlow(false)
-    fun refreshSubs() = viewModelScope.launch(Dispatchers.IO) {
-        if (refreshingFlow.value) return@launch
+    fun refreshSubs() = viewModelScope.launchTry(Dispatchers.IO) {
+        if (refreshingFlow.value) return@launchTry
         refreshingFlow.value = true
         var errorNum = 0
         val oldSubItems = subsItemsFlow.value
+        val subsIdToRaw = subsIdToRawFlow.value
+        oldSubItems.find { it.id == -2L }?.let { localSubsItem ->
+            if (!subsIdToRaw.containsKey(localSubsItem.id)) {
+                updateSubscription(
+                    RawSubscription(
+                        id = localSubsItem.id,
+                        name = "本地订阅",
+                        version = 0
+                    )
+                )
+            }
+        }
         val newSubsItems = oldSubItems.mapNotNull { oldItem ->
-            if (oldItem.updateUrl == null) return@mapNotNull null
-            val oldSubsRaw = subsIdToRawFlow.value[oldItem.id]
+            if (oldItem.updateUrl == null || oldItem.id < 0) return@mapNotNull null
+            val oldSubsRaw = subsIdToRaw[oldItem.id]
             try {
                 if (oldSubsRaw?.checkUpdateUrl != null) {
                     try {
@@ -283,13 +242,22 @@ class HomeVm @Inject constructor() : ViewModel() {
         appIds.mapIndexed { index, appId -> appId to index }.toMap()
     }
 
-    val sortTypeFlow = MutableStateFlow<SortTypeOption>(SortTypeOption.SortByName)
-    val showSystemAppFlow = MutableStateFlow(false)
+    val sortTypeFlow = storeFlow.map(viewModelScope) { s ->
+        SortTypeOption.allSubObject.find { o -> o.value == s.sortType } ?: SortTypeOption.SortByName
+    }
+    val showSystemAppFlow = storeFlow.map(viewModelScope) { s -> s.showSystemApp }
+    val showHiddenAppFlow = storeFlow.map(viewModelScope) { s -> s.showHiddenApp }
     val searchStrFlow = MutableStateFlow("")
     private val debounceSearchStrFlow = searchStrFlow.debounce(200)
         .stateIn(viewModelScope, SharingStarted.Eagerly, searchStrFlow.value)
     val appInfosFlow =
-        combine(orderedAppInfosFlow.combine(showSystemAppFlow) { appInfos, showSystemApp ->
+        combine(orderedAppInfosFlow.combine(showHiddenAppFlow) { appInfos, showHiddenApp ->
+            if (showHiddenApp) {
+                appInfos
+            } else {
+                appInfos.filter { a -> !a.hidden }
+            }
+        }.combine(showSystemAppFlow) { appInfos, showSystemApp ->
             if (showSystemApp) {
                 appInfos
             } else {

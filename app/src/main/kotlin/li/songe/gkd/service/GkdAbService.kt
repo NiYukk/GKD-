@@ -8,6 +8,7 @@ import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.os.Build
+import android.util.Log
 import android.util.LruCache
 import android.view.Display
 import android.view.View
@@ -16,46 +17,43 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.blankj.utilcode.util.LogUtils
 import com.blankj.utilcode.util.ScreenUtils
-import io.ktor.client.call.body
-import io.ktor.client.request.get
-import io.ktor.client.statement.bodyAsText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import li.songe.gkd.BuildConfig
+import li.songe.gkd.appScope
 import li.songe.gkd.composition.CompositionAbService
 import li.songe.gkd.composition.CompositionExt.useLifeCycleLog
 import li.songe.gkd.composition.CompositionExt.useScope
+import li.songe.gkd.data.ActionPerformer
 import li.songe.gkd.data.ActionResult
 import li.songe.gkd.data.AppRule
 import li.songe.gkd.data.AttrInfo
 import li.songe.gkd.data.GkdAction
-import li.songe.gkd.data.RawSubscription
 import li.songe.gkd.data.RpcError
 import li.songe.gkd.data.RuleStatus
-import li.songe.gkd.data.SubsVersion
-import li.songe.gkd.data.getActionFc
-import li.songe.gkd.db.DbSet
 import li.songe.gkd.debug.SnapshotExt
+import li.songe.gkd.shizuku.getShizukuCanUsedFlow
 import li.songe.gkd.shizuku.shizukuIsSafeOK
 import li.songe.gkd.shizuku.useSafeGetTasksFc
+import li.songe.gkd.shizuku.useSafeInputTapFc
 import li.songe.gkd.shizuku.useShizukuAliveState
+import li.songe.gkd.ui.home.UpdateTimeOption
 import li.songe.gkd.util.VOLUME_CHANGED_ACTION
-import li.songe.gkd.util.client
+import li.songe.gkd.util.checkSubsUpdate
 import li.songe.gkd.util.launchTry
 import li.songe.gkd.util.map
 import li.songe.gkd.util.storeFlow
-import li.songe.gkd.util.subsIdToRawFlow
-import li.songe.gkd.util.subsItemsFlow
 import li.songe.gkd.util.toast
-import li.songe.gkd.util.updateStorage
-import li.songe.gkd.util.updateSubscription
 import li.songe.selector.Selector
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -78,10 +76,10 @@ class GkdAbService : CompositionAbService({
     val shizukuAliveFlow = useShizukuAliveState()
     val shizukuGrantFlow = MutableStateFlow(false)
     var lastCheckShizukuTime = 0L
-    onAccessibilityEvent { // 借助无障碍轮询校验 shizuku 权限
-        if (storeFlow.value.enableShizuku && it.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {// 筛选降低判断频率
+    onAccessibilityEvent { // 借助无障碍轮询校验 shizuku 权限, 因为 shizuku 可能无故被关闭
+        if ((storeFlow.value.enableShizukuActivity || storeFlow.value.enableShizukuClick) && it.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {// 筛选降低判断频率
             val t = System.currentTimeMillis()
-            if (t - lastCheckShizukuTime > 30_000L) {
+            if (t - lastCheckShizukuTime > 60_000L) {
                 lastCheckShizukuTime = t
                 scope.launchTry(Dispatchers.IO) {
                     shizukuGrantFlow.value = if (shizukuAliveFlow.value) {
@@ -93,18 +91,34 @@ class GkdAbService : CompositionAbService({
             }
         }
     }
-    val safeGetTasksFc = useSafeGetTasksFc(scope, shizukuGrantFlow, shizukuAliveFlow)
+    val shizukuCanUsedFlow = getShizukuCanUsedFlow(
+        scope,
+        shizukuGrantFlow,
+        shizukuAliveFlow,
+        storeFlow.map(scope) { s -> s.enableShizukuActivity }
+    )
+    val safeGetTasksFc = useSafeGetTasksFc(scope, shizukuCanUsedFlow)
+
+    val shizukuClickCanUsedFlow = getShizukuCanUsedFlow(
+        scope,
+        shizukuGrantFlow,
+        shizukuAliveFlow,
+        storeFlow.map(scope) { s -> s.enableShizukuClick }
+    )
+    val safeInjectClickEventFc = useSafeInputTapFc(scope, shizukuClickCanUsedFlow)
+    injectClickEventFc = safeInjectClickEventFc
+    onDestroy {
+        injectClickEventFc = null
+    }
 
     // 当锁屏/上拉通知栏时, safeActiveWindow 没有 activityId, 但是此时 shizuku 获取到是前台 app 的 appId 和 activityId
     fun getShizukuTopActivity(): TopActivity? {
-        if (!storeFlow.value.enableShizuku) return null
+        if (!storeFlow.value.enableShizukuActivity) return null
         // 平均耗时 5 ms
         val top = safeGetTasksFc()?.lastOrNull()?.topActivity ?: return null
         return TopActivity(appId = top.packageName, activityId = top.className)
     }
-    shizukuTopActivityGetter = {
-        getShizukuTopActivity()
-    }
+    shizukuTopActivityGetter = ::getShizukuTopActivity
     onDestroy {
         shizukuTopActivityGetter = null
     }
@@ -132,23 +146,34 @@ class GkdAbService : CompositionAbService({
 
     var lastTriggerShizukuTime = 0L
     var lastContentEventTime = 0L
-    val queryThread = Dispatchers.IO.limitedParallelism(1)
+    // AccessibilityInteractionClient.getInstanceForThread(threadId)
+    val queryThread = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
     val actionThread = Dispatchers.IO.limitedParallelism(1)
     onDestroy {
         queryThread.cancel()
         actionThread.cancel()
     }
+    val events = mutableListOf<AccessibilityNodeInfo>()
     var queryTaskJob: Job? = null
-    fun newQueryTask(eventNode: AccessibilityNodeInfo? = null) {
+    fun newQueryTask(byEvent: Boolean = false, byForced: Boolean = false) {
         if (!storeFlow.value.enableService) return
-        val ctx = if (System.currentTimeMillis() - appChangeTime < 5000L) {
-            Dispatchers.IO
-        } else {
-            queryThread
-        }
-        queryTaskJob = scope.launchTry(ctx) {
+        queryTaskJob = scope.launchTry(queryThread) {
+            var latestEvent = synchronized(events) {
+                val size = events.size
+                if (size == 0 && byEvent) return@launchTry
+                val pair = if (size > 1) {
+                    if (BuildConfig.DEBUG) {
+                        Log.d("latestEvent", "丢弃事件=$size")
+                    }
+                    null
+                } else {
+                    events.lastOrNull()
+                }
+                events.clear()
+                pair
+            }
             val activityRule = getAndUpdateCurrentRules()
-            for (rule in (activityRule.currentRules)) {
+            for (rule in (activityRule.currentRules)) { // 规则数量有可能过多导致耗时过长
                 val statusCode = rule.status
                 if (statusCode == RuleStatus.Status3 && rule.matchDelayJob == null) {
                     rule.matchDelayJob = scope.launch(queryThread) {
@@ -158,7 +183,21 @@ class GkdAbService : CompositionAbService({
                     }
                 }
                 if (statusCode != RuleStatus.StatusOk) continue
-                val nodeVal = (eventNode ?: safeActiveWindow) ?: continue
+                if (byForced && !rule.checkForced()) continue
+                latestEvent?.let { n ->
+                    val refreshOk = try {
+                        n.refresh()
+                    } catch (e: Exception) {
+                        false
+                    }
+                    if (!refreshOk) {
+                        if (BuildConfig.DEBUG) {
+                            Log.d("latestEvent", "最新事件已过期")
+                        }
+                        latestEvent = null
+                    }
+                }
+                val nodeVal = (latestEvent ?: safeActiveWindow) ?: continue
                 val rightAppId = nodeVal.packageName?.toString() ?: break
                 val matchApp = rule.matchActivity(
                     rightAppId
@@ -173,33 +212,45 @@ class GkdAbService : CompositionAbService({
                                 topActivityFlow.value = TopActivity(appId = rightAppId)
                             }
                             getAndUpdateCurrentRules()
+                            scope.launch(actionThread) {
+                                delay(300)
+                                if (queryTaskJob?.isActive != true) {
+                                    newQueryTask()
+                                }
+                            }
                         }
                     }
                     return@launchTry
                 }
                 if (!matchApp) continue
-                val target = rule.query(nodeVal) ?: continue
+                val target = rule.query(nodeVal, defaultCacheTransform)
+                defaultCacheTransform.indexCache.clear()
+                if (target == null) {
+                    continue
+                }
                 if (activityRule !== getAndUpdateCurrentRules()) break
                 if (rule.checkDelay() && rule.actionDelayJob == null) {
-                    rule.actionDelayJob = scope.launch(queryThread) {
+                    rule.actionDelayJob = scope.launch(actionThread) {
                         delay(rule.actionDelay)
                         rule.actionDelayJob = null
                         newQueryTask()
                     }
                     continue
                 }
-                scope.launch(actionThread) {
-                    if (rule.status != RuleStatus.StatusOk) return@launch
-                    val actionResult = rule.performAction(context, target)
-                    if (actionResult.result) {
-                        rule.trigger()
-                        scope.launch(actionThread) {
-                            delay(300)
-                            if (queryTaskJob?.isActive != true) {
-                                newQueryTask()
-                            }
+                if (rule.status != RuleStatus.StatusOk) break
+                val actionResult = rule.performAction(context, target, safeInjectClickEventFc)
+                if (actionResult.result) {
+                    rule.trigger()
+                    scope.launch(actionThread) {
+                        delay(300)
+                        if (queryTaskJob?.isActive != true) {
+                            newQueryTask()
                         }
-                        toastClickTip()
+                    }
+                    if (storeFlow.value.toastWhenClick) {
+                        toast(storeFlow.value.clickToast)
+                    }
+                    appScope.launchTry(Dispatchers.IO) {
                         insertClickLog(rule)
                         LogUtils.d(
                             rule.statusText(),
@@ -210,18 +261,27 @@ class GkdAbService : CompositionAbService({
                 }
             }
             val t = System.currentTimeMillis()
-            if (t - lastTriggerTime < 5_000 || t - appChangeTime < 5_000) {
-                scope.launch(actionThread) {// 在任意规则触发5s内或APP切换5s内使用主动探测查询
+            if (t - lastTriggerTime < 3000L || t - appChangeTime < 5000L) {
+                scope.launch(actionThread) {
                     delay(300)
                     if (queryTaskJob?.isActive != true) {
                         newQueryTask()
+                    }
+                }
+            } else {
+                if (activityRule.currentRules.any { r -> r.checkForced() && r.status.let { s -> s == RuleStatus.StatusOk || s == RuleStatus.Status5 } }) {
+                    scope.launch(actionThread) {
+                        delay(300)
+                        if (queryTaskJob?.isActive != true) {
+                            newQueryTask(byForced = true)
+                        }
                     }
                 }
             }
         }
     }
 
-    val skipAppIds = listOf("com.android.systemui")
+    val skipAppIds = setOf("com.android.systemui")
     onAccessibilityEvent { event ->
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
             skipAppIds.contains(event.packageName.toString())
@@ -236,25 +296,19 @@ class GkdAbService : CompositionAbService({
             }
             lastContentEventTime = fixedEvent.time
         }
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                "AccessibilityEvent",
+                "type:${event.eventType},app:${event.packageName},cls:${event.className}"
+            )
+        }
 
         // AccessibilityEvent 的 clear 方法会在后续时间被 某些系统 调用导致内部数据丢失
         // 因此不要在协程/子线程内传递引用, 此处使用 data class 保存数据
         val evAppId = fixedEvent.appId
         val evActivityId = fixedEvent.className
 
-
         eventExecutor.execute launch@{
-            val eventNode = if (event.className == null) {
-                null // https://github.com/gkd-kit/gkd/issues/426 event.clear 已被系统调用
-            } else {
-                try {
-                    // 仍然报错 Cannot perform this action on a not sealed instance.
-                    // TODO 原因未知
-                    event.source
-                } catch (e: Exception) {
-                    null
-                }
-            }
             val oldAppId = topActivityFlow.value.appId
             val rightAppId = if (oldAppId == evAppId) {
                 oldAppId
@@ -270,7 +324,7 @@ class GkdAbService : CompositionAbService({
                         )
                     }
                 } else {
-                    if (storeFlow.value.enableShizuku && fixedEvent.time - lastTriggerShizukuTime > 300) {
+                    if (storeFlow.value.enableShizukuActivity && fixedEvent.time - lastTriggerShizukuTime > 300) {
                         val shizukuTop = getShizukuTopActivity()
                         if (shizukuTop != null && shizukuTop.appId == rightAppId) {
                             if (shizukuTop.activityId == evActivityId) {
@@ -302,48 +356,18 @@ class GkdAbService : CompositionAbService({
             if (evAppId != rightAppId) {
                 return@launch
             }
-
-            newQueryTask(eventNode)
-        }
-    }
-
-    fun checkSubsUpdate() = scope.launchTry(Dispatchers.IO) { // 自动从网络更新订阅文件
-        LogUtils.d("开始自动检测更新")
-        subsItemsFlow.value.forEach { subsItem ->
-            if (subsItem.updateUrl == null) return@forEach
-            try {
-                val oldSubsRaw = subsIdToRawFlow.value[subsItem.id]
-                if (oldSubsRaw?.checkUpdateUrl != null) {
-                    try {
-                        val subsVersion =
-                            client.get(oldSubsRaw.checkUpdateUrl).body<SubsVersion>()
-                        LogUtils.d("快速检测更新成功", subsVersion)
-                        if (subsVersion.id == oldSubsRaw.id && subsVersion.version <= oldSubsRaw.version) {
-                            return@forEach
-                        }
-                    } catch (e: Exception) {
-                        LogUtils.d("快速检测更新失败", subsItem, e)
+            if (!storeFlow.value.enableService) return@launch
+            val eventNode = event.safeSource
+            synchronized(events) {
+                val eventLog = events.lastOrNull()
+                if (eventNode != null) {
+                    if (eventLog == eventNode) {
+                        events.removeLast()
                     }
+                    events.add(eventNode)
                 }
-                val newSubsRaw = RawSubscription.parse(
-                    client.get(oldSubsRaw?.updateUrl ?: subsItem.updateUrl).bodyAsText()
-                )
-                if (newSubsRaw.id != subsItem.id) {
-                    return@forEach
-                }
-                if (oldSubsRaw != null && newSubsRaw.version <= oldSubsRaw.version) {
-                    return@forEach
-                }
-                updateSubscription(newSubsRaw)
-                val newItem = subsItem.copy(
-                    mtime = System.currentTimeMillis()
-                )
-                DbSet.subsItemDao.update(newItem)
-                LogUtils.d("更新订阅文件:${newSubsRaw.name}")
-            } catch (e: Exception) {
-                e.printStackTrace()
-                LogUtils.d("检测更新失败", e)
             }
+            newQueryTask(eventNode != null)
         }
     }
 
@@ -353,7 +377,7 @@ class GkdAbService : CompositionAbService({
             val i = storeFlow.value.updateSubsInterval
             if (i <= 0) return@onAccessibilityEvent
             val t = System.currentTimeMillis()
-            if (t - lastUpdateSubsTime > i.coerceAtLeast(60 * 60_000)) {
+            if (t - lastUpdateSubsTime > i.coerceAtLeast(UpdateTimeOption.Everyday.value)) {
                 lastUpdateSubsTime = t
                 checkSubsUpdate()
             }
@@ -402,10 +426,9 @@ class GkdAbService : CompositionAbService({
                         } catch (e: Exception) {
                             LogUtils.d("创建无障碍悬浮窗失败", e)
                             toast("创建无障碍悬浮窗失败")
-                            updateStorage(
-                                storeFlow,
-                                storeFlow.value.copy(enableAbFloatWindow = false)
-                            )
+                            storeFlow.update { store ->
+                                store.copy(enableAbFloatWindow = false)
+                            }
                         }
                     }
                 } else {
@@ -497,7 +520,7 @@ class GkdAbService : CompositionAbService({
     companion object {
 
         var shizukuTopActivityGetter: (() -> TopActivity?)? = null
-
+        private var injectClickEventFc: ((x: Float, y: Float) -> Boolean?)? = null
         val eventExecutor: ExecutorService by lazy { Executors.newSingleThreadExecutor() }
         var service: GkdAbService? = null
 
@@ -506,16 +529,26 @@ class GkdAbService : CompositionAbService({
         fun execAction(gkdAction: GkdAction): ActionResult {
             val serviceVal = service ?: throw RpcError("无障碍没有运行")
             val selector = Selector.parseOrNull(gkdAction.selector) ?: throw RpcError("非法选择器")
-            selector.propertyNames.forEach { n ->
-                if (!allowPropertyNames.contains(n)) {
-                    throw RpcError("未知属性名:$n")
-                }
+            selector.checkSelector()?.let {
+                throw RpcError(it)
             }
             val targetNode =
-                serviceVal.safeActiveWindow?.querySelector(selector, gkdAction.quickFind)
-                    ?: throw RpcError("没有选择到节点")
+                serviceVal.safeActiveWindow?.querySelector(
+                    selector,
+                    gkdAction.quickFind,
+                    if (selector.canCacheIndex) createCacheTransform().transform else null
+                ) ?: throw RpcError("没有查询到节点")
 
-            return getActionFc(gkdAction.action)(serviceVal, targetNode)
+            if (gkdAction.action == null) {
+                // 仅查询
+                return ActionResult(
+                    action = null,
+                    result = true
+                )
+            }
+
+            return ActionPerformer.getAction(gkdAction.action)
+                .perform(serviceVal, targetNode, gkdAction.position, injectClickEventFc)
         }
 
 
